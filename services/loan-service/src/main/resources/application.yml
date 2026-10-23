@@ -1,0 +1,7 @@
+server.port: 8084
+spring.application.name: loan-service
+spring.datasource.url: ${DB_URL:jdbc:mysql://localhost:3306/loan_db}
+spring.datasource.username: ${DB_USER:ebanking}
+spring.datasource.password: ${DB_PASSWORD:ebanking}
+spring.jpa.hibernate.ddl-auto: validate
+eureka.client.service-url.defaultZone: ${EUREKA_URL:http://localhost:8761/eureka}

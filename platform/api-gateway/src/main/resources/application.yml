@@ -1,0 +1,29 @@
+server.port: 8080
+spring:
+  application.name: api-gateway
+  cloud:
+    gateway.server.webflux:
+      discovery.locator.enabled: true
+      routes:
+        - id: auth-kyc
+          uri: lb://auth-kyc-service
+          predicates: [ "Path=/api/v1/auth/**,/api/v1/kyc/**" ]
+        - id: accounts
+          uri: lb://account-service
+          predicates: [ "Path=/api/v1/accounts/**,/api/v1/beneficiaries/**" ]
+        - id: transfers
+          uri: lb://fund-transfer-service
+          predicates: [ Path=/api/v1/transfers/** ]
+        - id: cards
+          uri: lb://card-service
+          predicates: [ Path=/api/v1/cards/** ]
+        - id: loans
+          uri: lb://loan-service
+          predicates: [ Path=/api/v1/loans/** ]
+        - id: fraud-alerts
+          uri: lb://notification-fraud-service
+          predicates: [ Path=/api/v1/fraud-alerts/** ]
+  data.redis.host: ${REDIS_HOST:localhost}
+eureka.client.service-url.defaultZone: ${EUREKA_URL:http://localhost:8761/eureka}
+management.endpoints.web.exposure.include: health,info,gateway
+security.jwt.secret: ${JWT_SECRET:replace-this-with-a-32-byte-production-secret}
