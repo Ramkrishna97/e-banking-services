@@ -1,0 +1,11 @@
+**
+!platform/
+!platform/*/
+!platform/*/build/
+!platform/*/build/libs/
+!platform/*/build/libs/*-SNAPSHOT.jar
+!services/
+!services/*/
+!services/*/build/
+!services/*/build/libs/
+!services/*/build/libs/*-SNAPSHOT.jar

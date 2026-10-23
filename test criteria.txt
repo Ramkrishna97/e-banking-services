@@ -1,0 +1,138 @@
+E-BANKING BACKEND API TEST CRITERIA
+===================================
+Base URL: http://localhost:8080 (API Gateway). Run on a disposable local database.
+Method: HTTP requests through Gateway, then MySQL SELECT/COUNT checks using Docker.
+Test identity: a unique email/mobile and UUID per run. Never reuse production credentials.
+Status: PENDING / PASS / FAIL / BLOCKED. Observed results are recorded below.
+
+AUTH-KYC SERVICE
+----------------
+A1 POST /api/v1/auth/register
+   Request: email, password (12+ chars), legalName, mobileNumber, dateOfBirth.
+   Expected: 201; customerId, accessToken, refreshToken, expiresAt; one customers row
+   and one credentials row with a hash, not a plaintext password. Duplicate email 409
+   and no additional rows. Invalid email/short password 400 and no rows.
+A2 POST /api/v1/auth/login
+   Request: email and password.
+   Expected: 200 and fresh tokens for correct credentials; 401 for wrong password;
+   no additional customers or credentials. No uncaught exception.
+A3 POST /api/v1/auth/mfa/verify?customerId={id}&otp={otp}
+   Expected: valid enrolled factor gives 200 and tokens; invalid OTP 401/403; no data
+   mutation for invalid challenge. Fixed test OTP or unenrolled factor must NOT pass.
+
+ACCOUNT SERVICE
+---------------
+B1 POST /api/v1/accounts (Bearer token)
+   Request: customerId, type=SAVINGS, minimumBalance=0.
+   Expected: 201 and account id/number/status ACTIVE; one account_db.accounts row
+   owned by authenticated subject. Invalid/negative minimum balance 400, no row.
+B2 GET /api/v1/accounts (Bearer token)
+   Expected: 200 array containing created account; no database mutation.
+B3 POST /api/v1/accounts/{id}/freeze (Bearer token)
+   Expected: 200, status FROZEN in body and DB; unknown/foreign id 404; no other
+   account changed. Unauthenticated request 401.
+
+FUND TRANSFER SERVICE
+---------------------
+C1 POST /api/v1/transfers (Bearer token, Idempotency-Key)
+   Request: sourceAccountId, destinationAccountReference, rail=IMPS, amount=10.25.
+   Expected: 201 POSTED only when source ACTIVE and funded, beneficiary permitted;
+   payment_transfers row plus balanced journal_lines and outbox event committed in
+   one transaction; source/destination balance projections updated or held.
+   Repeating same key/payload returns same reference and no extra debit/journal.
+   Reusing key with different payload returns conflict. Missing key returns 400.
+   Insufficient funds/frozen source/negative amount returns 4xx and no ledger rows.
+
+LOAN SERVICE
+------------
+D1 POST /api/v1/loans/quote (Bearer token)
+   Request: principal=120000, annualRate=12, months=12.
+   Expected: 200, monthlyEmi about 10661.85, totalInterest about 7942.20;
+   no loan application/loan rows. Negative principal or zero months returns 400.
+
+CARD SERVICE
+------------
+E1 POST /api/v1/cards (Bearer token), request type=DEBIT.
+   Expected: 201; card id, masked number/lastFour; exactly one card_db.cards row.
+   No PAN/PIN stored in plaintext. Invalid type 400, no card.
+E2 GET /api/v1/cards?id={id} (Bearer token)
+   Expected: 200 matching card, no DB mutation; unknown id 404.
+E3 POST /api/v1/cards/{id}/block and /unblock (Bearer token)
+   Expected: 200 statuses BLOCKED then ACTIVE; persisted state changes in DB.
+E4 PATCH /api/v1/cards/{id}/controls (Bearer token)
+   Request: internationalEnabled=true, ecommerceEnabled=false.
+   Expected: 200 matching controls; persisted in card_db.card_controls.
+
+NOTIFICATION / FRAUD SERVICE
+----------------------------
+F1 POST /api/v1/fraud-alerts (Bearer token)
+   Request: customerId, amount=100001, newGeography=false, eventsLastHour=1.
+   Expected: 200/201, severity HIGH; durable alert/event accessible after restart.
+   Low amount/normal geography/low velocity returns LOW; invalid input 400.
+F2 GET /api/v1/fraud-alerts?customerId={id} (Bearer token)
+   Expected: 200 list including F1 alert; no data mutation.
+
+CROSS-SERVICE / SECURITY
+------------------------
+X1 Gateway routes each authenticated endpoint to the correct Eureka-registered
+   service; 401 without token; 200/201 with valid access token; no trust in a
+   caller-supplied X-Customer-Id when it differs from JWT subject. A refresh
+   token used as an access token must return 401.
+X2 Create customer -> create account -> request transfer: identities agree across
+   services; transfer posts only if account checks pass; Kafka outbox event delivered
+   once or deduplicated; downstream notification/fraud alert observed.
+X3 The same transfer key retried through Gateway after restart does not post twice.
+
+EXECUTION RECORD
+----------------
+See the final run entries appended below. Do not mark X2/X3 PASS unless all
+prerequisite service and financial-persistence criteria pass.
+
+Run date: 2026-10-23. Tester: tests/backend-api-smoke.ps1 via Spring Cloud Gateway,
+plus MySQL SELECT checks against the service-owned databases.
+Run command: powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/backend-api-smoke.ps1
+The command exits nonzero while required banking acceptance criteria remain
+unimplemented. Use -SmokeOnly to check only the currently executable smoke subset.
+
+PASS (40/40 executable smoke assertions):
+  A1 register HTTP 201; one customer and one hashed-credential row; duplicate
+     email 409; invalid request 400.
+  A2 correct login 200 with token; wrong password 401.
+  A3 invalid and unenrolled OTP both 403 (no token issued).
+  B1 create account 201 and one matching DB row; negative minimum 400.
+  B2 portfolio 200 and contains created account.
+  B3 freeze 200 and status FROZEN persisted in account_db; unknown id 404.
+  C1 fail-closed behavior 503 for attempted posting; no new transfer/journal row;
+     negative amount 400; missing idempotency key 400; frozen-account attempt
+     also 503.
+  D1 quote 200 and EMI 10661.85; negative principal/zero tenure 400.
+  E1 issue 201 and one card_db row; invalid card type 400; E2 get 200/unknown 404;
+     E3 block/unblock 200; E4 controls 200 and matching card_controls DB row.
+  F1 high/low fraud signals returned HIGH/LOW; invalid signal 400; F2 listed
+     both before restart.
+  X1 Gateway rejected missing token and refresh-as-access token with 401;
+     routing worked for auth, accounts,
+     transfers, loans, cards and fraud; forged X-Customer-Id was overwritten;
+     foreign account/alert bodies were rejected 403.
+  Config Server, Eureka and Gateway health endpoints returned HTTP 200.
+  Card retrieval after card-service restart returned HTTP 200 with controls
+     international=true and ecommerce=false unchanged.
+
+FAIL:
+  F1/F2 durability: after notification-fraud-service restart, the same GET
+     returned HTTP 200 with 0 alerts instead of the prior 2. Alert state is
+     process memory only; no durable event store/DB projection is implemented.
+
+BLOCKED / NOT IMPLEMENTED (not counted as smoke passes):
+  A3 valid enrolled MFA: no enrollment or TOTP validation flow exists. The
+     previous fixed OTP bypass was removed; all challenges currently fail 403.
+  C1 successful transfer: deliberately returns 503 until account checks,
+     double-entry journal persistence and transactional outbox are implemented.
+     No successful debit/credit, idempotent replay or settlement was verified.
+  X2 customer-to-account-to-transfer-to-Kafka-to-notification flow: blocked by
+     the unavailable transfer engine; no cross-service financial event exists.
+  X3 post-restart idempotency replay: blocked by the unavailable transfer engine.
+
+Conclusion: HTTP routing, identity, accounts, quotes and persisted card controls
+were exercised; the full backend does NOT yet satisfy these acceptance criteria.
+Do not use it for real money movement or claim end-to-end banking completion.

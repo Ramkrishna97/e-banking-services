@@ -1,0 +1,6 @@
+rootProject.name = 'e-banking-platform'
+
+// Module implementations are introduced in their respective delivery phases.
+include 'platform:config-server', 'platform:discovery-server', 'platform:api-gateway'
+include 'services:auth-kyc-service', 'services:account-service', 'services:fund-transfer-service'
+include 'services:loan-service', 'services:card-service', 'services:notification-fraud-service'
