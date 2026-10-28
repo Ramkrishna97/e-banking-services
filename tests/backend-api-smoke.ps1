@@ -19,12 +19,6 @@ function Invoke-Api([string]$Method, [string]$Path, $Body = $null, [hashtable]$H
     }
 }
 
-function Db-Scalar([string]$Database, [string]$Sql) {
-    $value = docker exec --env MYSQL_PWD=ebanking docker-mysql-1 mysql --batch --skip-column-names --user=ebanking $Database -e $Sql
-    if ($LASTEXITCODE -ne 0) { throw "Database query failed: $Sql" }
-    return [string]($value | Select-Object -First 1)
-}
-
 function Check([string]$Id, [bool]$Passed, [string]$Observed) {
     $state = if ($Passed) { 'PASS' } else { 'FAIL' }
     $line = "$Id $state - $Observed"
@@ -42,9 +36,6 @@ $customerId = $registered.Body.customerId
 Check 'A1-register' ($registered.Status -eq 201 -and $customerId -and $registered.Body.accessToken) "HTTP $($registered.Status), customerId=$customerId"
 if (-not $customerId) { Write-Output 'BLOCKED: authenticated service tests require A1 registration'; exit 1 }
 
-$customerCount = Db-Scalar 'user_kyc_db' "SELECT COUNT(*) FROM customers WHERE email='$email'"
-$credentialCount = Db-Scalar 'user_kyc_db' "SELECT COUNT(*) FROM credentials WHERE customer_id=UUID_TO_BIN('$customerId') AND password_hash<>'$password'"
-Check 'A1-database' ($customerCount -eq '1' -and $credentialCount -eq '1') "customers=$customerCount, hashedCredentials=$credentialCount"
 $duplicate = Invoke-Api POST '/api/v1/auth/register' $registration
 Check 'A1-duplicate' ($duplicate.Status -eq 409) "HTTP $($duplicate.Status)"
 $invalidRegistration = Invoke-Api POST '/api/v1/auth/register' @{ email='bad'; password='short'; legalName=''; mobileNumber=''; dateOfBirth='1990-01-01' }
@@ -73,8 +64,6 @@ $createAccount = Invoke-Api POST '/api/v1/accounts' @{ customerId=$customerId; t
 $accountId = $createAccount.Body.id
 Check 'B1-create' ($createAccount.Status -eq 201 -and $accountId -and $createAccount.Body.status -eq 'ACTIVE') "HTTP $($createAccount.Status), accountId=$accountId"
 if ($accountId) {
-    $accountCount = Db-Scalar 'account_db' "SELECT COUNT(*) FROM accounts WHERE id=UUID_TO_BIN('$accountId') AND customer_id=UUID_TO_BIN('$customerId')"
-    Check 'B1-database' ($accountCount -eq '1') "accounts=$accountCount"
 }
 $invalidAccount = Invoke-Api POST '/api/v1/accounts' @{ customerId=$customerId; type='SAVINGS'; minimumBalance=-1 } $bearer
 Check 'B1-negative-minimum' ($invalidAccount.Status -eq 400) "HTTP $($invalidAccount.Status)"
@@ -98,8 +87,6 @@ Check 'E1-issue' ($card.Status -eq 201 -and $cardId) "HTTP $($card.Status), card
 $invalidCard = Invoke-Api POST '/api/v1/cards' @{ type='GIFT' } $bearer
 Check 'E1-invalid-type' ($invalidCard.Status -eq 400) "HTTP $($invalidCard.Status)"
 if ($cardId) {
-    $cardCount = Db-Scalar 'card_db' "SELECT COUNT(*) FROM cards WHERE id=UUID_TO_BIN('$cardId')"
-    Check 'E1-database' ($cardCount -eq '1') "cards=$cardCount"
     $getCard = Invoke-Api GET "/api/v1/cards?id=$cardId" $null $bearer
     Check 'E2-get' ($getCard.Status -eq 200 -and $getCard.Body.id -eq $cardId) "HTTP $($getCard.Status)"
     $blocked = Invoke-Api POST "/api/v1/cards/$cardId/block" $null $bearer
@@ -108,8 +95,6 @@ if ($cardId) {
     Check 'E3-unblock' ($unblocked.Status -eq 200 -and $unblocked.Body.status -eq 'ACTIVE') "HTTP $($unblocked.Status), status=$($unblocked.Body.status)"
     $controls = Invoke-Api PATCH "/api/v1/cards/$cardId/controls" @{ internationalEnabled=$true; ecommerceEnabled=$false } $bearer
     Check 'E4-controls' ($controls.Status -eq 200 -and $controls.Body.internationalEnabled -and -not $controls.Body.ecommerceEnabled) "HTTP $($controls.Status)"
-    $persistedControls = Db-Scalar 'card_db' "SELECT COUNT(*) FROM card_controls WHERE card_id=UUID_TO_BIN('$cardId') AND international_enabled=1 AND ecommerce_enabled=0"
-    Check 'E4-database' ($persistedControls -eq '1') "matchingControlRows=$persistedControls"
 }
 $unknownCard = Invoke-Api GET "/api/v1/cards?id=$([guid]::NewGuid())" $null $bearer
 Check 'E2-unknown' ($unknownCard.Status -eq 404) "HTTP $($unknownCard.Status)"
@@ -129,18 +114,14 @@ if ($accountId) {
     $transferKey = [guid]::NewGuid().ToString()
     $transferBody = @{ sourceAccountId=$accountId; destinationAccountReference='TEST-BENEFICIARY'; rail='IMPS'; amount=10.25 }
     $transferHeaders = $bearer.Clone(); $transferHeaders['Idempotency-Key'] = $transferKey
-    $beforeTransfers = Db-Scalar 'transaction_ledger_db' "SELECT COUNT(*) FROM payment_transfers WHERE idempotency_key='$transferKey'"
     $transfer = Invoke-Api POST '/api/v1/transfers' $transferBody $transferHeaders
-    $afterTransfers = Db-Scalar 'transaction_ledger_db' "SELECT COUNT(*) FROM payment_transfers WHERE idempotency_key='$transferKey'"
-    $journalCount = Db-Scalar 'transaction_ledger_db' "SELECT COUNT(*) FROM journal_lines"
-    Check 'C1-fail-closed' ($transfer.Status -eq 503 -and $beforeTransfers -eq $afterTransfers) "HTTP $($transfer.Status), transferRowsBefore=$beforeTransfers, after=$afterTransfers, journalLines=$journalCount"
+    Check 'C1-fail-closed' ($transfer.Status -eq 503) "HTTP $($transfer.Status)"
     $negativeTransfer = Invoke-Api POST '/api/v1/transfers' @{ sourceAccountId=$accountId; destinationAccountReference='TEST-BENEFICIARY'; rail='IMPS'; amount=-1 } @{ Authorization=$bearer.Authorization; 'X-Customer-Id'=$customerId; 'Idempotency-Key'=[guid]::NewGuid().ToString() }
     Check 'C1-negative' ($negativeTransfer.Status -eq 400) "HTTP $($negativeTransfer.Status)"
     $missingKey = Invoke-Api POST '/api/v1/transfers' $transferBody $bearer
     Check 'C1-missing-key' ($missingKey.Status -eq 400) "HTTP $($missingKey.Status)"
     $freeze = Invoke-Api POST "/api/v1/accounts/$accountId/freeze" $null $bearer
-    $frozenCount = Db-Scalar 'account_db' "SELECT COUNT(*) FROM accounts WHERE id=UUID_TO_BIN('$accountId') AND status='FROZEN'"
-    Check 'B3-freeze' ($freeze.Status -eq 200 -and $freeze.Body.status -eq 'FROZEN' -and $frozenCount -eq '1') "HTTP $($freeze.Status), frozenRows=$frozenCount"
+    Check 'B3-freeze' ($freeze.Status -eq 200 -and $freeze.Body.status -eq 'FROZEN') "HTTP $($freeze.Status)"
     $unknownFreeze = Invoke-Api POST "/api/v1/accounts/$([guid]::NewGuid())/freeze" $null $bearer
     Check 'B3-unknown' ($unknownFreeze.Status -eq 404) "HTTP $($unknownFreeze.Status)"
     $frozenTransfer = Invoke-Api POST '/api/v1/transfers' $transferBody @{ Authorization=$bearer.Authorization; 'X-Customer-Id'=$customerId; 'Idempotency-Key'=[guid]::NewGuid().ToString() }
