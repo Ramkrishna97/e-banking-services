@@ -23,7 +23,6 @@ spring:
         - id: fraud-alerts
           uri: lb://notification-fraud-service
           predicates: [ Path=/api/v1/fraud-alerts/** ]
-  data.redis.host: ${REDIS_HOST:localhost}
 eureka.client.service-url.defaultZone: ${EUREKA_URL:http://localhost:8761/eureka}
 management.endpoints.web.exposure.include: health,info,gateway
 security.jwt.secret: ${JWT_SECRET:replace-this-with-a-32-byte-production-secret}
